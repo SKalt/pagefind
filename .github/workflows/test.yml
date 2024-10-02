@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  HUMANE_VERSION: "0.9.1"
   WASM_PACK_VERSION: "v0.10.3"
 
 jobs:
@@ -19,6 +18,7 @@ jobs:
       run:
         shell: bash
     strategy:
+      fail-fast: false
       matrix:
         include:
           - build: linux
@@ -59,11 +59,18 @@ jobs:
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
-            toolchain: ${{ matrix.rust }}
-            target: ${{ matrix.target }}
-            override: true
-            default: true
-            components: rustfmt, clippy
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+          override: true
+          default: true
+          components: rustfmt, clippy
+
+      - name: Set up python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # NOTE: ^this strategy leaves older python versions intentionally
+          # without test coverage to keep CI fast.
 
       - name: Check versions
         run: |
@@ -74,13 +81,6 @@ jobs:
         uses: jetli/wasm-pack-action@v0.4.0
         with:
           version: ${{env.WASM_PACK_VERSION}}
-
-      - name: Install humane
-        uses: supplypike/setup-bin@v3
-        with:
-          uri: "https://github.com/CloudCannon/humane/releases/download/v${{env.HUMANE_VERSION}}/humane-v${{env.HUMANE_VERSION}}-${{matrix.target}}.tar.gz"
-          name: "humane"
-          version: ${{env.HUMANE_VERSION}}
 
       - name: Build Coupled JS
         working-directory: ./pagefind_web_js
@@ -117,5 +117,47 @@ jobs:
         run: cargo test --release --lib --features extended
 
       - name: Test CLI
-        working-directory: ./pagefind
-        run: TEST_BINARY=../target/release/pagefind humane
+        run: ./test_ci.sh "release"
+
+      - name: Set up poetry
+        run: ./wrappers/python/scripts/ci/github/setup_poetry.sh
+
+      - name: cache venv
+        uses: actions/cache@v4
+        with:
+          path: wrappers/python/.venv
+          key: ${{ runner.os }}-poetry-3.12-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install dev dependencies
+        run: ./wrappers/python/scripts/ci/github/install_dev_dependencies.sh
+
+      - name: activate venv
+        run: ./wrappers/python/scripts/ci/github/activate_venv.sh
+
+      - name: debug python paths
+        run: ./wrappers/python/scripts/ci/github/debug_python_paths.sh
+
+      - name: Lint python
+        # avoid duplicating linting work on different OSes
+        if: runner.os == 'Linux'
+        working-directory: ./wrappers/python
+        run: ./scripts/ci/python_lints.sh
+
+      - name: ensure cog up-to-date
+        # avoid duplicating linting work on different OSes
+        if: runner.os == 'Linux'
+        working-directory: ./wrappers/python
+        run: ./scripts/ci/cog/check.sh
+
+      - name: set PYTHONPATH
+        shell: bash
+        working-directory: ./wrappers/python
+        run: python ./scripts/ci/github/add_src_to_pythonpath.py
+      - name: add target/release to windows PATH
+        shell: bash
+        run: echo $PWD/target/release >> "$GITHUB_PATH"
+      - name: Test python API
+        timeout-minutes: 1
+        # ^ guard against the tests getting deadlock if the subprocess pipe
+        # gets clogged
+        run: ./wrappers/python/scripts/ci/github/integration_tests.sh
